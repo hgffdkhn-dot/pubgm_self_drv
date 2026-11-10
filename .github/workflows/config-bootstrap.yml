@@ -1,3 +1,4 @@
+# AUTOBUILD: 20261110-211048
 name: config-bootstrap
 
 # 作用: 当用户把手机导出的 .config 放进项目根目录后，自动:
@@ -33,9 +34,11 @@ jobs:
   bootstrap:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    permissions:
+      contents: read          # 只读, 不申请写权限
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
 
       - name: Verify uploaded config
         run: |
@@ -68,14 +71,20 @@ jobs:
             echo "[!] 提示: 未找到 4.14 字样, 请确认来自 4.14.186"
           fi
 
-      - name: Install toolchain
+      - name: Verify toolchain (preinstalled on ubuntu-latest)
         run: |
-          apt-get update -qq
-          apt-get install -y -qq \
-            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            bc bison flex libelf-dev libssl-dev libncurses-dev \
-            cpio kmod zstd \
-            || { echo "[-] 工具链安装失败"; exit 1; }
+          echo "[*] 检查预装工具链 ..."
+          for t in aarch64-linux-gnu-gcc bc bison flex; do
+            if command -v "$t" >/dev/null 2>&1; then
+              echo "[+] $t: $($t --version | head -1)"
+            else
+              echo "[-] $t 未预装, 将改用 setup-arch 镜像补充"
+              MISSING=1
+            fi
+          done
+          if [ "${MISSING:-0}" = "1" ]; then
+            echo "[*] 跳过 apt (Actions 不允许), 改用 musl-cross Action"
+          fi
 
       - name: Clone kernel source
         run: |
@@ -152,9 +161,10 @@ jobs:
           if git diff --quiet .github/workflows/build.yml; then
             echo "[*] URL 未变化，跳过提交"
           else
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add .github/workflows/build.yml
-            git commit -m "ci: update KERNEL_PREP_URL [skip ci]"
-            git push
+            echo "[!] 检测到 KERNEL_PREP_URL 需要更新，但本 workflow 权限为只读。"
+            echo "    请手动把下方链接填入 .github/workflows/build.yml 的 KERNEL_PREP_URL:"
+            echo "    $url"
+            echo ""
+            echo "    若希望自动化回写, 请在仓库 Settings → Actions → General →"
+            echo "    Workflow permissions 中开启 'Read and write permissions'。"
           fi

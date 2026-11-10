@@ -1,3 +1,6 @@
+# AUTOBUILD: 20261110-211048
+# 本文件全篇不含 apt-get / sudo / git push 任何调用
+# 工具链策略: ubuntu-latest 自带 -> 缺失则从 GitHub Release 下载静态预编译二进制
 name: build-ko
 
 on:
@@ -14,7 +17,11 @@ on:
       - '.github/workflows/*.yml'
 
 env:
+  # 预编译内核树 (跑过一次 config-bootstrap 后填这里, 可大幅加速)
   KERNEL_PREP_URL: "https://github.com/REPLACE_WITH_YOUR_USER/REPLACE_WITH_YOUR_REPO/releases/download/kernel-prep/kernel_ares_prepared.tar.zst"
+  # 预编译交叉编译器 (aarch64-linux-musl-cross 静态二进制, 约 90MB)
+  # 格式: <user>/<repo>/<tag>/<filename>
+  TOOLCHAIN_URL: "https://github.com/REPLACE_WITH_YOUR_USER/REPLACE_WITH_YOUR_REPO/releases/download/toolchain/aarch64-linux-musl-cross.tgz"
 
 jobs:
   build:
@@ -22,20 +29,43 @@ jobs:
     timeout-minutes: 120
     steps:
       - name: Checkout driver
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
 
-      - name: 检查工具链（ubuntu-latest 预装，绝不调用 apt）
+      - name: 探测工具链 (ubuntu-latest 自带检测, 不调用 apt)
         run: |
-          echo "[*] 检查工具链 ..."
+          echo "[*] 探测宿主工具链 ..."
           for t in aarch64-linux-gnu-gcc bc bison flex; do
             if command -v "$t" >/dev/null 2>&1; then
-              echo "[+] $t: $($t --version | head -1)"
+              echo "[+] host: $t ($($t --version | head -1))"
             else
-              echo "[-] $t 缺失，ubuntu-latest 本应预装，请检查镜像"
-              exit 1
+              echo "[!] host: $t 缺失"
+              echo "TOOLCHAIN_MISSING=1" >> "$GITHUB_ENV"
             fi
           done
-          echo "[+] 全部就绪"
+
+      - name: 拉取预编译工具链 (仅宿主缺失时)
+        if: env.TOOLCHAIN_MISSING == '1'
+        run: |
+          echo "[*] 宿主缺工具链, 尝试从 GitHub Release 下载静态交叉编译器 ..."
+          mkdir -p "$HOME/xc"
+          if curl -sSL -o xc.tgz "$TOOLCHAIN_URL" 2>/dev/null && [ -s xc.tgz ]; then
+            echo "[+] 下载成功"
+            tar -xzf xc.tgz -C "$HOME/xc" 2>&1 | tail -3
+            find "$HOME/xc" -name 'aarch64-*gcc' -type f 2>/dev/null | head
+          else
+            echo "[-] TOOLCHAIN_URL 未替换或 Release 不存在" >&2
+            echo "[-] 可选方案: 自行发布预编译工具链, 或用本地 Linux 跑 prep_kernel.sh" >&2
+            exit 1
+          fi
+          echo "$HOME/xc/bin" >> "$GITHUB_PATH"
+          echo "$HOME/xc/usr/bin" >> "$GITHUB_PATH"
+
+      - name: 验证工具链可用
+        run: |
+          echo "[*] 最终工具链状态 ..."
+          for t in aarch64-linux-gnu-gcc bc bison flex; do
+            command -v "$t" >/dev/null 2>&1 && echo "[+] $t: $($t --version | head -1)" || { echo "[-] $t 仍缺失, 无法继续"; exit 1; }
+          done
 
       - name: 准备内核树
         run: |
@@ -43,59 +73,93 @@ jobs:
           KS="$GITHUB_WORKSPACE/kernel_ares"
           mkdir -p "$KS"
           echo "[*] 尝试下载预编译内核树 ..."
+          FETCHED=0
           if curl -sSL -o kernel.tar.zst "$KERNEL_PREP_URL" 2>/dev/null && [ -s kernel.tar.zst ]; then
-            echo "[+] 下载成功"
+            echo "[+] 下载成功, 解压 ..."
+            ls -lh kernel.tar.zst
             tar -xf kernel.tar.zst -C "$GITHUB_WORKSPACE" 2>&1 | tail -3
+            FETCHED=1
           else
-            echo "[!] 预编译内核树不可用，将现场 clone 并编译"
+            echo "[!] 预编译内核树不可用 (KERNEL_PREP_URL 未替换或 Release 未发布)"
           fi
-          ls -la "$KS" 2>/dev/null | head -20
-          if [ ! -f "$KS/Module.symvers" ]; then
-            echo "[*] Module.symvers 缺失，现场 clone 内核并全量编译 ..."
+
+          echo "    --- 内核树状态 ---"
+          ls -la "$KS" 2>/dev/null | head -25 || true
+          if [ -f "$KS/Module.symvers" ]; then
+            echo "    Module.symvers: 存在 ($(wc -l < "$KS/Module.symvers") 条)"
+          else
+            echo "    Module.symvers: 缺失"
+          fi
+
+          if [ "$FETCHED" -eq 0 ]; then
+            echo "[*] 现场编译: 找 .config ..."
             CFG=""
             for f in .config config kernel_config config.txt; do
-              [ -f "$f" ] && CFG="$f" && break
+              if [ -f "$f" ]; then CFG="$f"; break; fi
             done
-            [ -z "$CFG" ] && { echo "[-] 根目录无 .config 且无可下载内核树"; exit 1; }
-            echo "[+] 使用 $CFG"
-            git clone --depth 1 -b ares-r-oss https://github.com/MiCode/Xiaomi_Kernel_OpenSource "$KS" || \
-            git clone --depth 1 -b ares-r-oss https://github.com/AbzRaider/kernel_xiaomi_ares "$KS" || \
-              { echo "[-] clone 失败"; exit 1; }
+            if [ -z "$CFG" ]; then
+              echo "[-] 根目录无 .config, 且预编译内核树不可用." >&2
+              echo "[-] 可选方案: 推送手机导出的 .config 并跑 config-bootstrap, 或本地跑 prep_kernel.sh" >&2
+              exit 1
+            fi
+            echo "[+] 使用 $CFG 现场编译内核"
+            git clone --depth 1 -b ares-r-oss \
+              https://github.com/MiCode/Xiaomi_Kernel_OpenSource "$KS" \
+              || git clone --depth 1 -b ares-r-oss \
+                 https://github.com/AbzRaider/kernel_xiaomi_ares "$KS" \
+              || { echo "[-] 内核源码 clone 失败"; exit 1; }
             cp "$CFG" "$KS/.config"
             cd "$KS"
             make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
             make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j"$(nproc)" Image modules 2>&1 | tail -20
             cd "$GITHUB_WORKSPACE"
           fi
-          [ -f "$KS/Module.symvers" ] || { echo "[-] Module.symvers 仍缺失"; exit 2; }
-          echo "[+] Module.symvers 就绪 ($(wc -l < "$KS/Module.symvers") 条)"
 
-      - name: 编译驱动
+          if [ ! -f "$KS/Module.symvers" ]; then
+            echo "[-] 内核树缺少 Module.symvers, 驱动模块必败" >&2
+            exit 2
+          fi
+          echo "[+] Module.symvers 就绪"
+
+      - name: Build driver module
         run: |
           set -u
-          echo "[*] randomize ..."
+          echo "[*] 随机化 ioctl cmd (randomize.sh 写 build/ 目录, 不修改工作区) ..."
           sh ./tools/randomize.sh || { echo "[-] randomize 失败"; exit 1; }
-          sh ./tools/sync_client.sh || echo "[!] sync 失败，继续"
-          echo "[*] make ..."
-          KERNEL_TREE="$GITHUB_WORKSPACE/kernel_ares" sh ./tools/build.sh 2>&1 | tee build.log
-          [ -f pubgm_self_drv.ko ] || { echo "[-] 未产出 .ko"; tail -50 build.log; exit 2; }
 
-      - name: 编译用户态 client
+          echo "[*] 同步用户态 client.h ..."
+          sh ./tools/sync_client.sh || echo "[!] 同步失败, 继续"
+
+          echo "[*] 编译驱动 ..."
+          KERNEL_TREE="$GITHUB_WORKSPACE/kernel_ares" \
+            sh ./tools/build.sh 2>&1 | tee build.log
+          if [ ! -f pubgm_self_drv.ko ]; then
+            echo "[-] 未产出 pubgm_self_drv.ko"
+            tail -50 build.log
+            exit 2
+          fi
+
+      - name: Build userspace client
         run: |
           set -u
+          gcc -Wall -Wextra -O2 -c user/client.c -o user/client.o \
+            && echo "[+] client.c 语法检查通过" \
+            || { echo "[-] client.c 编译失败"; exit 1; }
           aarch64-linux-gnu-gcc -static -Wall -O2 -o user/test_client user/test_client.c user/client.c \
-            && echo "[+] test_client 交叉编译成功" \
-            || echo "[!] test_client 失败"
-          ls -lh user/test_client 2>/dev/null
+            && echo "[+] test_client (aarch64 static) 编译成功" \
+            || echo "[!] test_client 交叉编译失败"
+          ls -lh user/client.o user/test_client 2>/dev/null
 
-      - name: 上传产物
-        uses: actions/upload-artifact@v4
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: pubgm_self_drv
           path: |
             pubgm_self_drv.ko
             user/test_client
+            user/client.o
             tools/load.sh
             tools/randomize.sh
             tools/sync_client.sh
+            README.md
           retention-days: 7
