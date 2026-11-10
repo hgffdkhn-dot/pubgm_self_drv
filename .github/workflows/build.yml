@@ -1,0 +1,46 @@
+name: build-ko
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    env:
+      KERNEL_REPO: https://github.com/MiCode/Xiaomi_Kernel_OpenSource
+      KERNEL_BRANCH: ares-r-4.14.186
+    steps:
+      - name: Checkout driver
+        uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt update
+          sudo apt install -y bc bison flex libssl-dev \
+            gcc-aarch64-linux-gnu make git
+
+      - name: Clone kernel source
+        run: |
+          git clone --depth 1 -b $KERNEL_BRANCH $KERNEL_REPO kernel_ares
+
+      - name: Prepare kernel
+        run: |
+          cd kernel_ares
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- ares_defconfig
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare -j$(nproc)
+
+      - name: Build driver
+        run: |
+          bash tools/randomize.sh
+          bash tools/build.sh
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pubgm_self_drv
+          path: |
+            pubgm_self_drv.ko
+            user/test_client
+            user/libclient.a
