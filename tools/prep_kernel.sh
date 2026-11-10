@@ -64,18 +64,11 @@ else
             https://github.com/AbzRaider/kernel_xiaomi_ares "$KERNEL_TREE"
 fi
 
-# 工具链
+# 工具链检查 (Actions 镜像预装, 无需 apt)
 if ! command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
-    if [ -n "$CI" ]; then
-        apt-get update -qq
-        apt-get install -y -qq \
-            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            bc bison flex libelf-dev libssl-dev libncurses-dev \
-            cpio kmod
-    else
-        echo "[-] 需要 aarch64-linux-gnu-gcc，请先安装交叉工具链"
-        exit 127
-    fi
+    echo "[-] 未找到 aarch64-linux-gnu-gcc" >&2
+    echo "[-] Actions 应预装该工具链; 本地请自行确保 PATH 中存在该命令" >&2
+    exit 127
 fi
 
 cd "$KERNEL_TREE"

@@ -34,28 +34,17 @@ else
     echo "[!] 未找到 sync_client.sh，跳过用户态同步"
 fi
 
-# ---- 步骤 3: 工具链自检 ----
+# ---- 步骤 3: 工具链自检 (Actions 镜像预装, 无需 apt) ----
 echo "[*] 步骤 3/5: 检查工具链 ..."
 ensure_toolchain() {
     if command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
         echo "[+] aarch64-linux-gnu-gcc: $(aarch64-linux-gnu-gcc --version | head -1)"
         return 0
     fi
-    echo "[*] 安装交叉编译工具链 ..."
-    if [ -n "${CI+x}" ]; then
-        apt-get update -qq
-        apt-get install -y -qq \
-            gcc-aarch64-linux-gnu \
-            binutils-aarch64-linux-gnu \
-            bc bison flex \
-            libelf-dev libssl-dev libncurses-dev \
-            python3 \
-            || { echo "[-] 工具链安装失败" >&2; exit 127; }
-    else
-        echo "[-] 未找到 aarch64-linux-gnu-gcc，请先安装:" >&2
-        echo "    sudo apt install gcc-aarch64-linux-gnu bc bison flex libelf-dev libssl-dev" >&2
-        exit 127
-    fi
+    # AUTOBUILD:20261110-203732 不再引用 apt, 仅检测
+    echo "[-] 未找到 aarch64-linux-gnu-gcc" >&2
+    echo "[-] Actions ubuntu-latest 应预装; 本地请自行确保 PATH 中存在该命令" >&2
+    exit 127
 }
 ensure_toolchain
 
