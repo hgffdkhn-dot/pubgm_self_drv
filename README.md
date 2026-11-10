@@ -1,98 +1,129 @@
-# pubgm_self_drv — 自研内核驱动（红米K40游戏增强版 ares / 4.14.186）
+# pubgm_self_drv — 自研内核驱动
 
-## ⚠️ 声明
-本项目仅用于 **Android 内核安全研究 / 学习页表遍历与内核模块隐藏技术**。
-请勿用于违反游戏用户协议、破坏公平性的用途。使用本项目产生的任何后果由使用者自行承担。
+红米K40游戏增强版 (ares) / 内核 4.14.186 专用。
 
-## 项目结构
+特点：
+- 自研，不依赖市面泛滥驱动
+- 手动页表遍历读取物理内存，不触发缺页/Accessed 位
+- 模块加载即摘链表 + 删文件 + 随机设备节点名
+- ioctl 命令码编译期随机化
+
+## 目录结构
+
 ```
 pubgm_self_drv/
-├── Makefile              # 内核模块编译入口
-├── Kbuild                # 内核 build 配置
-├── drv_main.c            # 模块入口 + 加载后擦痕迹
-├── mem_core.c            # 页表遍历读目标进程内存
-├── ioctl_if.c            # 用户态 ioctl 通信（随机 cmd 码 + 握手）
-├── hide.c                # 隐藏：摘模块链表 / 擦符号
+├── drv_main.c        # 模块入口，init/exit
+├── mem_core.c        # 页表遍历读内存核心
+├── ioctl_if.c        # 用户态通信接口
+├── hide.c            # 模块隐藏
 ├── include/
 │   ├── drv.h
-│   └── pt_walk.h
+│   ├── pt_walk.h
+│   └── drv_ioctl.h   # 由 tools/randomize.sh 生成
 ├── user/
-│   ├── Makefile
-│   └── client.c          # 用户态库，对接 qx-对接.h 风格接口
-└── tools/
-    ├── build.sh          # 云编译 / 本地编译脚本
-    ├── load.sh           # 随机名 insmod + 删文件 + 随机节点
-    └── randomize.sh      # 编译前随机化驱动名 / cmd 码
+│   ├── client.c      # 用户态读写接口
+│   ├── client.h
+│   └── test_client.c
+├── tools/
+│   ├── build.sh      # 主编译脚本（CI 友好）
+│   ├── prep_kernel.sh
+│   ├── pack_kernel.sh
+│   ├── load.sh       # 随机名加载 + 删文件
+│   └── randomize.sh  # 随机化 ioctl cmd
+├── Kbuild
+├── Makefile
+└── README.md
 ```
 
-## 一、编译（Ubuntu / GitHub Actions / Termux+proot）
-依赖：aarch64-linux-gnu-gcc、make、bc、bison、flex、libssl-dev、对应内核源码树。
+## 最重要的一步：把手机的 .config 放进项目根目录
+
+没有它，驱动模块会加载失败（内核版本/配置不匹配）。
 
 ```bash
-# 1. 拉取 ares 内核源码（小米官方仓库；分支名是 ares-r-oss，不含版本号）
-git clone --depth 1 -b ares-r-oss https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git kernel_ares
-export KERNEL=/path/to/kernel_ares
+# 手机上执行（需要 root 或 /proc/config.gz 可读）
+adb shell "zcat /proc/config.gz" > .config
 
-# （强烈推荐）把手机当前内核配置导出来覆盖，保证模块与运行内核 100% 匹配
-# 手机上执行：zcat /proc/config.gz > /data/local/tmp/config
-# 然后：cp /data/local/tmp/config $KERNEL/.config
-
-# 2. 首次编译内核（生成 Module.symvers / 头文件）
-cd $KERNEL
-# 若已放好 .config：make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
-make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- ares_defconfig
-make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare -j$(nproc)
-
-# 3. 编译本驱动
-cd /path/to/pubgm_self_drv
-make KDIR=$KERNEL        # 产出 pubgm_self.ko
+# 把这个 .config 文件放到项目根目录，即 pubgm_self_drv/ 的同级目录
+#   pubgm_self_drv/
+#   .config          <-- 就放这里
+#   README.md
 ```
 
-> 随机化：每次编译前跑 `bash tools/randomize.sh`，会随机替换驱动名和 ioctl cmd 偏移。
+`prep_kernel.sh` 会自动找 `.config`，查找顺序：
+1. `$CONFIG_FILE` 环境变量
+2. 项目根目录 `/.config`
+3. 项目根目录任意文件名含 `config` 的文件（如 `kernel_config`、`config.txt`）
+4. 内核树内 `.config`
 
-## 二、加载（手机端，root）
+脚本会校验 `CONFIG_ARM64=y` 与 `4.14` 版本号。
+
+## 编译（两条路线，选一条）
+
+### 路线 A：全自动（推荐，没电脑也能跑）
+
+1. 把 `.config` 放进项目根目录，`git push`
+2. 到 Actions 页面手动触发 **`config-bootstrap`** 工作流
+3. 它会：clone 内核 -> 注入你的 `.config` -> 全量编译 -> 打包上传 Release -> **自动把下载链接写回 `build.yml`**
+4. 之后再 push 代码，`build-ko` 工作流自动下载内核树 + 增量编译出 `pubgm_self_drv.ko`
+
+### 路线 B：本地准备内核树
+
 ```bash
-adb push pubgm_self.ko /data/local/tmp/
+./tools/prep_kernel.sh
+# 产出: kernel_ares/Module.symvers
+
+./tools/pack_kernel.sh
+# 产出: kernel_ares_prepared.tar.zst
+# 上传到 GitHub Release (tag: kernel-prep)
+# 把下载链接填到 .github/workflows/build.yml 顶部 KERNEL_PREP_URL
+```
+
+### 触发增量编译
+
+```bash
+git add . && git commit -m "update" && git push
+```
+
+## 加载（手机端）
+
+```bash
+adb push pubgm_self_drv.ko /data/local/tmp/
 adb shell
 su
-cd /data/local/tmp
-bash /path/to/load.sh     # 随机名 insmod + 删 ko + 建随机 /dev 节点
+sh /data/local/tmp/load.sh
 ```
 
 `load.sh` 会：
-1. 把 ko 复制成随机 6 位小写字母名（隐藏文件）
-2. `insmod` 加载
-3. 加载完立刻 `rm` 掉源文件
-4. 在 `/dev/` 下建随机名字符设备节点
-5. 驱动内部摘掉模块链表、擦符号
+1. 随机化 ko 文件名
+2. `insmod`
+3. 加载完删除原文件
+4. 建一个随机名 `/dev` 节点
 
-## 三、用户态对接
+## 用户态对接
+
 ```cpp
-#include "client.h"
+#include "user/client.h"
 
 int main() {
-    drv_connect("/dev/.随机节点名");      // load.sh 会打印实际节点名
-    uintptr_t base = get_module_base(pid, "libUE4.so");
-    uintptr_t uworld = read_qword(pid, base + 0x1771CC38);  // GWorld
-    // ... 接你已有的偏移体系
+    drv_connect("/dev/<随机节点>");
+    uintptr_t val = read_qword(pid, addr);
+    return 0;
 }
 ```
 
-接口与 `qx-对接.h` 风格一致：`read_qword` / `write_qword` / `get_module_base`，
-用户态只走 `ioctl`，**完全不调** `process_vm_readv` / 不读 `/proc/pid/mem`。
+## 反检测 Checklist
 
-## 四、反检测要点（务必全过再上号）
-- [ ] 驱动名 / 节点名 / ioctl cmd 全部随机化
-- [ ] 模块从链表摘除，`lsmod` 不可见
-- [ ] `/proc/kallsyms` 无本驱动符号
-- [ ] 无 printk / 不写内核日志
-- [ ] 用户态不出现 process_vm_readv
-- [ ] 读取间隔抖动，不在游戏渲染线程上下文
-- [ ] 先用小号测试 24h，稳定后再用主力号
+- [ ] 不出现 `process_vm_readv` 调用
+- [ ] 不读 `/proc/pid/mem` 用户态
+- [ ] 驱动名随机、节点名随机、cmd 码每次编译变
+- [ ] `lsmod` 看不到（摘链表）
+- [ ] `/proc/kallsyms` 无驱动符号
+- [ ] 不写内核日志（别 printk 生产环境）
+- [ ] 读取间隔抖动，不在游戏主线程上下文
+- [ ] 小号先测 24 小时，再上主力号
 
-## 五、验证加载是否成功
-```bash
-lsmod | grep -i 随机名     # 应为空
-cat /proc/kallsyms | grep drv_init   # 应为空
-./user/test_client         # 自带的读写测试程序
-```
+## 参考
+
+- 小米内核开源: https://github.com/MiCode/Xiaomi_Kernel_OpenSource
+- ares (红米K40游戏增强版) 分支: `ares-r-oss`
+- 4.14.186 内核，ARM64

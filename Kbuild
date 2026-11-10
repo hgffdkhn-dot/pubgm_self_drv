@@ -1,5 +1,7 @@
-obj-m += pubgm_self_drv.o
+# Kbuild - kernel build file
+# 与 Makefile 保持一致，部分内核版本只认 Kbuild
 
-pubgm_self_drv-y := drv_main.o mem_core.o ioctl_if.o hide.o
+MODULE_NAME ?= pubgm_self_drv
 
-ccflags-y := -I$(src)/include -Wall -Wno-unused-function
+obj-m += $(MODULE_NAME).o
+$(MODULE_NAME)-objs := drv_main.o mem_core.o ioctl_if.o hide.o

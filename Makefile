@@ -1,21 +1,19 @@
-# Makefile for pubgm_self_drv (Ares 4.14.186)
-# 用法: make KDIR=/path/to/kernel_ares [CROSS=aarch64-linux-gnu-]
+# Makefile for pubgm_self_drv kernel module
+#
+# 由 tools/build.sh 调用，通过 make -C $(KERNEL_TREE) M=$(PWD) 进入
+# 不要直接在此 Makefile 里执行，统一走 build.sh
 
-KDIR ?= /lib/modules/$(shell uname -r)/build
-CROSS ?= aarch64-linux-gnu-
-ARCH := arm64
+MODULE_NAME ?= pubgm_self_drv
 
-obj-m := pubgm_self_drv.o
-pubgm_self_drv-objs := drv_main.o mem_core.o ioctl_if.o hide.o
+# 源文件
+obj-m += $(MODULE_NAME).o
+$(MODULE_NAME)-objs := drv_main.o mem_core.o ioctl_if.o hide.o
 
+# 默认目标（供 build.sh 触发）
 all:
-	$(MAKE) -C $(KDIR) M=$(PWD) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS) modules
+	$(MAKE) -C $(KERNEL_TREE) M=$(PWD) modules
 
 clean:
-	$(MAKE) -C $(KDIR) M=$(PWD) ARCH=$(ARCH) clean
+	$(MAKE) -C $(KERNEL_TREE) M=$(PWD) clean
 
-# 快速随机化：编译前换名字和 cmd 偏移
-randomize:
-	@bash tools/randomize.sh
-
-.PHONY: all clean randomize
+.PHONY: all clean
