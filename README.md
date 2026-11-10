@@ -29,12 +29,17 @@ pubgm_self_drv/
 依赖：aarch64-linux-gnu-gcc、make、bc、bison、flex、libssl-dev、对应内核源码树。
 
 ```bash
-# 1. 拉取 ares 4.14.186 内核源码（小米开源）
-git clone --depth 1 -b ares-r-4.14.186 https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git kernel_ares
+# 1. 拉取 ares 内核源码（小米官方仓库；分支名是 ares-r-oss，不含版本号）
+git clone --depth 1 -b ares-r-oss https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git kernel_ares
 export KERNEL=/path/to/kernel_ares
+
+# （强烈推荐）把手机当前内核配置导出来覆盖，保证模块与运行内核 100% 匹配
+# 手机上执行：zcat /proc/config.gz > /data/local/tmp/config
+# 然后：cp /data/local/tmp/config $KERNEL/.config
 
 # 2. 首次编译内核（生成 Module.symvers / 头文件）
 cd $KERNEL
+# 若已放好 .config：make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
 make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- ares_defconfig
 make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare -j$(nproc)
 

@@ -16,6 +16,17 @@ cd "$(dirname "$0")/.."
 echo "[*] kernel: $KERNEL"
 echo "[*] cross:  $CROSS"
 
+# 优先使用手机导出的真实内核配置（保证与目标内核完全一致）
+# 生成方法（在手机上执行）：zcat /proc/config.gz > /data/local/tmp/config
+# 然后放到 $KERNEL/.config 即可
+if [ -f "$KERNEL/.config" ]; then
+    echo "[*] using phone .config (from /proc/config.gz) for exact match"
+    make -C "$KERNEL" ARCH=arm64 CROSS_COMPILE=$CROSS olddefconfig -j$(nproc) || true
+else
+    echo "[*] no .config found, falling back to ares_defconfig"
+    make -C "$KERNEL" ARCH=arm64 CROSS_COMPILE=$CROSS ares_defconfig -j$(nproc) || true
+fi
+
 # 首次编译内核头文件 (如未完成)
 if [ ! -f "$KERNEL/Module.symvers" ]; then
     echo "[*] preparing kernel..."

@@ -9,8 +9,12 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     env:
+      # 小米官方仓库；红米K40游戏增强版 ares 的分支名是 ares-r-oss
       KERNEL_REPO: https://github.com/MiCode/Xiaomi_Kernel_OpenSource
-      KERNEL_BRANCH: ares-r-4.14.186
+      KERNEL_BRANCH: ares-r-oss
+      # 备用镜像（官方仓库挂了/太慢时取消注释换用）
+      # KERNEL_REPO: https://github.com/AbzRaider/kernel_xiaomi_ares
+      # KERNEL_BRANCH: S
     steps:
       - name: Checkout driver
         uses: actions/checkout@v4
@@ -23,12 +27,25 @@ jobs:
 
       - name: Clone kernel source
         run: |
-          git clone --depth 1 -b $KERNEL_BRANCH $KERNEL_REPO kernel_ares
+          git clone --depth 1 -b "$KERNEL_BRANCH" "$KERNEL_REPO" kernel_ares \
+            || git clone --depth 1 "https://github.com/AbzRaider/kernel_xiaomi_ares" -b S kernel_ares
+
+      - name: Upload phone config (optional)
+        uses: actions/upload-artifact@v4
+        with:
+          name: phone-config
+          path: config   # 把手机上 `zcat /proc/config.gz` 得到的 config 文件放仓库根目录即可启用
+        continue-on-error: true
 
       - name: Prepare kernel
         run: |
           cd kernel_ares
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- ares_defconfig
+          if [ -f ../config ]; then
+            cp ../config .config
+            make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+          else
+            make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- ares_defconfig
+          fi
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare -j$(nproc)
 
       - name: Build driver
