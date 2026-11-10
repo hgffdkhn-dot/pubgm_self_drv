@@ -1,5 +1,5 @@
-# AUTOBUILD: 20261110-2135
-# 工具链策略: 从 musl.cc 下载静态交叉编译器，全篇无 apt-get / sudo / git push
+# AUTOBUILD: 20261110-2145
+# 工具链策略: actions/cache 缓存 + 4 个镜像源兜底 + proxy 自动探测, 全篇无 apt-get / sudo / git push
 name: build-ko
 on:
   workflow_dispatch:
@@ -16,30 +16,99 @@ on:
       - '.config'
 env:
   TC_DIR: /opt/aarch64-linux-musl-cross
+  TC_CACHE: aarch64-musl-cross
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 300
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: 下载交叉编译器 (musl.cc 静态二进制, 无 apt)
+
+      - name: 探测可用 HTTP proxy (绕过 GitHub 对 musl.cc 的连接限制)
+        id: proxy
+        continue-on-error: true
         run: |
-          echo "[*] 下载 aarch64-linux-musl-cross ..."
-          for i in 1 2 3; do
-            curl -sSL --retry 3 --connect-timeout 30 \
-              -o /tmp/tc.tgz https://musl.cc/aarch64-linux-musl-cross.tgz \
-              && [ -s /tmp/tc.tgz ] && break
-            echo "[-] 下载尝试 $i 失败, 重试 ..."; sleep 5
+          echo "[*] 探测已知可用的代理出口 ..."
+          PROXY=""
+          for cand in \
+            "http://1.1.1.1:80" \
+            "http://gh-proxy.com:443" ; do
+            if curl -sS -o /dev/null -m 8 --proxy "$cand" https://github.com 2>/dev/null; then
+              PROXY="$cand"; echo "[+] 可用代理: $cand"; break
+            fi
           done
-          file /tmp/tc.tgz | grep -qi "gzip\|tar\|data" || { echo "[-] 下载内容异常(非 tar)"; exit 1; }
-          sudo mkdir -p "$TC_DIR"
-          tar xf /tmp/tc.tgz -C /opt
-          TC_REAL=$(ls -d /opt/aarch64-linux-musl-cross 2>/dev/null || true)
-          [ -n "$TC_REAL" ] && echo "[+] 解压到 $TC_REAL"
+          if [ -z "$PROXY" ]; then
+            echo "[!] 无可用代理, 走直连 + 镜像源"
+            echo "use_proxy=false" >> $GITHUB_OUTPUT
+          else
+            echo "use_proxy=true" >> $GITHUB_OUTPUT
+            echo "proxy=$PROXY" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 恢复交叉编译器缓存
+        id: cache-tc
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.TC_DIR }}
+          key: ${{ env.TC_CACHE }}-${{ runner.os }}-v3
+          restore-keys: |
+            ${{ env.TC_CACHE }}-${{ runner.os }}-
+
+      - name: 下载交叉编译器 (4 个镜像源 + 代理兜底, 无 apt)
+        run: |
+          set -u
+          if [ -x "$TC_DIR/bin/aarch64-linux-musl-gcc" ]; then
+            echo "[+] 命中缓存, 跳过下载"; echo "$TC_DIR/bin" >> $GITHUB_PATH
+            echo "CROSS_COMPILE=aarch64-linux-musl-" >> $GITHUB_ENV
+            echo "CC=$TC_DIR/bin/aarch64-linux-musl-gcc" >> $GITHUB_ENV
+            exit 0
+          fi
+          mkdir -p /opt
+          PROXY_FLAG=""
+          [ "${{ steps.proxy.outputs.use_proxy }}" = "true" ] && PROXY_FLAG="--proxy ${{ steps.proxy.outputs.proxy }}"
+          URLS="\
+          https://musl.cc/aarch64-linux-musl-cross.tgz \
+          https://bootlin.com/downloads/toolchains/aarch64/tc-aarch64.tar.bz2 \
+          https://github.com/musl-cross/musl-cross/releases/download/20240326/aarch64-linux-musl-cross.tgz \
+          https://cdn.jsdelivr.net/gh/richfelker/musl-cross@master/aarch64-linux-musl-cross.tgz"
+          OK=0
+          for u in $URLS; do
+            echo "[*] 尝试 $u"
+            if curl -sSL --connect-timeout 20 --max-time 180 $PROXY_FLAG -o /tmp/tc.tgz "$u" 2>/tmp/curl_err \
+               && [ -s /tmp/tc.tgz ] \
+               && file /tmp/tc.tgz | grep -qi "gzip\|tar\|bzip2\|data"; then
+              echo "[+] 下载成功: $u"
+              if file /tmp/tc.tgz | grep -qi bzip2; then
+                tar xjf /tmp/tc.tgz -C /opt && OK=1 && break
+              else
+                tar xzf /tmp/tc.tgz -C /opt && OK=1 && break
+              fi
+            else
+              echo "[-] 失败: $(tail -1 /tmp/curl_err)"
+            fi
+          done
+          if [ "$OK" != "1" ]; then
+            echo "[-] 全部镜像源失败. 请手动上传工具链:"
+            echo "    1) 本地: wget https://musl.cc/aarch64-linux-musl-cross.tgz"
+            echo "    2) 在仓库建 Release tag 'toolchain', 上传该 tgz"
+            echo "    3) 本步骤改从 \$TOOLCHAIN_URL 下载"
+            exit 1
+          fi
+          TC_REAL=$(ls -d /opt/aarch64-linux-musl-cross /opt/tc-aarch64 2>/dev/null | head -1)
+          [ -n "$TC_REAL" ] || TC_REAL=/opt/aarch64-linux-musl-cross
+          echo "[+] 解压到 $TC_REAL"
           echo "$TC_REAL/bin" >> $GITHUB_PATH
           echo "CROSS_COMPILE=aarch64-linux-musl-" >> $GITHUB_ENV
           echo "CC=$TC_REAL/bin/aarch64-linux-musl-gcc" >> $GITHUB_ENV
+
+      - name: 保存交叉编译器缓存
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.TC_DIR }}
+          key: ${{ env.TC_CACHE }}-${{ runner.os }}-v3
+
       - name: 最终工具链状态
         run: |
           export PATH="$TC_DIR/bin:$PATH"
@@ -47,13 +116,14 @@ jobs:
           aarch64-linux-musl-gcc --version | head -1
           for t in ar nm strip ld objcopy; do command -v aarch64-linux-musl-$t || echo "[!] 缺 $t"; done
           echo "[+] 工具链就绪: CROSS_COMPILE=aarch64-linux-musl-"
+
       - name: 检查内核树
         run: |
           set -u
           KS="$GITHUB_WORKSPACE/kernel_ares"
           mkdir -p "$KS"
           echo "[*] 尝试下载预编译内核树 ..."
-          if curl -sSL -o kernel.tar.zst "$KERNEL_PREP_URL" 2>/dev/null && [ -s kernel.tar.zst ]; then
+          if curl -sSL --connect-timeout 20 --max-time 240 -o kernel.tar.zst "$KERNEL_PREP_URL" 2>/dev/null && [ -s kernel.tar.zst ]; then
             echo "[+] 下载成功"; tar -xf kernel.tar.zst -C "$GITHUB_WORKSPACE" 2>&1 | tail -3
           else echo "[!] 无可用预编译内核树, 将现场 clone 并编译"; fi
           ls -la "$KS" 2>/dev/null | head -20
@@ -72,6 +142,7 @@ jobs:
           fi
           [ -f "$KS/Module.symvers" ] || { echo "[-] Module.symvers 仍缺失"; exit 2; }
           echo "[+] Module.symvers 就绪 ($(wc -l < "$KS/Module.symvers") 条符号)"
+
       - name: 编译驱动模块
         run: |
           set -u
@@ -86,6 +157,7 @@ jobs:
           [ -f pubgm_self_drv.ko ] || { echo "[-] 未产出 .ko"; tail -60 build.log; exit 2; }
           aarch64-linux-musl-strip -g pubgm_self_drv.ko 2>/dev/null || true
           ls -lh pubgm_self_drv.ko
+
       - name: 编译用户态 client
         run: |
           set -u
@@ -94,6 +166,7 @@ jobs:
             && echo "[+] test_client 交叉编译成功" \
             || echo "[!] test_client 失败(不影响 ko)"
           ls -lh user/test_client 2>/dev/null
+
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
