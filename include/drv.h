@@ -15,21 +15,20 @@
 
 #include "pt_walk.h"
 
-/* 随机化魔术与 cmd —— randomize.sh 会在此处替换成随机值 */
+/* 随机化魔术与 cmd:
+ *  - 若 tools/randomize.sh 已生成 build/drv_ioctl.h, 则定义 DRV_IOCTL_RANDOMIZED,
+ *    此处整套宏被跳过(避免重复定义报错);
+ *  - 若未随机化(本地直接 make), 用下方固定值, 此时用户态 client.h 的 cmd 也须一致. */
+#ifndef DRV_IOCTL_RANDOMIZED
+
 #define DRV_MAGIC        'Z'
 
-#ifndef DRV_OP_AUTH
 #define DRV_OP_AUTH      _IOWR(DRV_MAGIC, 0x3A, struct drv_req)
-#endif
-#ifndef DRV_OP_READ
 #define DRV_OP_READ      _IOWR(DRV_MAGIC, 0x7C, struct drv_req)
-#endif
-#ifndef DRV_OP_WRITE
 #define DRV_OP_WRITE     _IOWR(DRV_MAGIC, 0x91, struct drv_req)
-#endif
-#ifndef DRV_OP_MODBASE
 #define DRV_OP_MODBASE   _IOWR(DRV_MAGIC, 0x52, struct drv_req)
-#endif
+
+#endif /* DRV_IOCTL_RANDOMIZED */
 
 #define DRV_NAME_DEFAULT "gpu_aux"
 

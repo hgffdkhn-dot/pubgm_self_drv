@@ -9,6 +9,9 @@ static int do_read(struct drv_req *r)
     void *buf;
     int ret;
 
+    if (r->size == 0 || r->size > 0x100000)
+        return -EINVAL;
+
     task = find_get_task_by_vpid(r->pid);
     if (!task)
         return -ESRCH;
@@ -38,9 +41,11 @@ long drv_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
     if (copy_from_user(&r, (void __user *)arg, sizeof(r)))
         return -EFAULT;
 
-    /* AUTH 不需要 token */
+    /* AUTH 握手: 拿到即生效, 用 XOR 扰乱 token, 0 视为未初始化 */
     if (cmd == DRV_OP_AUTH) {
         g_token = r.token ^ 0x5A5A5A5A;
+        if (g_token == 0)
+            g_token = 0x5A5A5A5A;
         return 0;
     }
 
@@ -57,7 +62,6 @@ long drv_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
         ret = -ENOSYS;
         break;
     case DRV_OP_MODBASE:
-        /* 返回 /proc/pid/maps 里 name 对应的基址 —— 由用户态解析 maps */
         ret = -ENOSYS;
         break;
     default:
