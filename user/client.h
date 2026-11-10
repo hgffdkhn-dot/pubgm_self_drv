@@ -3,10 +3,10 @@
 #include <stdint.h>
 
 #define DRV_MAGIC 'Z'
-#define DRV_OP_AUTH    _IOWR(DRV_MAGIC, 0x28, struct drv_req)
-#define DRV_OP_READ    _IOWR(DRV_MAGIC, 0x76, struct drv_req)
-#define DRV_OP_WRITE   _IOWR(DRV_MAGIC, 0xB6, struct drv_req)
-#define DRV_OP_MODBASE _IOWR(DRV_MAGIC, 0xF6, struct drv_req)
+#define DRV_OP_AUTH    _IOWR(DRV_MAGIC, 0x3C, struct drv_req)
+#define DRV_OP_READ    _IOWR(DRV_MAGIC, 0x4E, struct drv_req)
+#define DRV_OP_WRITE   _IOWR(DRV_MAGIC, 0xAC, struct drv_req)
+#define DRV_OP_MODBASE _IOWR(DRV_MAGIC, 0xEE, struct drv_req)
 
 struct drv_req {
     int    pid;

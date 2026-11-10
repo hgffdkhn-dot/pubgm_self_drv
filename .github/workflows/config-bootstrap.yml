@@ -1,0 +1,160 @@
+name: config-bootstrap
+
+# 作用: 当用户把手机导出的 .config 放进项目根目录后，自动:
+#   1. clone 小米 ares-r-oss 内核源码
+#   2. 把用户的 .config 注入内核树并 olddefconfig
+#   3. 全量编译，产出 Module.symvers
+#   4. 打包成 kernel_ares_prepared.tar.zst 上传到 kernel-prep Release
+#   5. 自动把下载链接写回 build.yml 顶部的 KERNEL_PREP_URL
+#
+# 触发: 推送 .config / kernel_config / config 等文件到根目录
+#
+# 注意: 全量编译约 60-120 分钟，需调大超时。免费 runner 单次最长 6 小时。
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.config'
+      - 'config'
+      - 'kernel_config'
+      - 'config.txt'
+      - '*config*'
+      - 'tools/prep_kernel.sh'
+      - 'tools/pack_kernel.sh'
+
+env:
+  KERNEL_BRANCH: "ares-r-oss"
+  KERNEL_REPO: "https://github.com/MiCode/Xiaomi_Kernel_OpenSource"
+  BACKUP_REPO: "https://github.com/AbzRaider/kernel_xiaomi_ares"
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify uploaded config
+        run: |
+          set -u
+          echo "[*] 查找项目根目录的配置文件 ..."
+          CFG=""
+          for f in .config config kernel_config config.txt; do
+            if [ -f "$f" ]; then CFG="$f"; break; fi
+          done
+          if [ -z "$CFG" ]; then
+            echo "[-] 未找到 .config，请把手机导出的配置放到项目根目录后推送" >&2
+            ls -la *.config 2>/dev/null || true
+            exit 1
+          fi
+          echo "[+] 找到配置文件: $CFG ($(wc -l < "$CFG") 行, $(wc -c < "$CFG") 字节)"
+          # 转码: 防止 Windows 行尾 CRLF / UTF-16
+          file "$CFG"
+          mv "$CFG" .config
+          # 强制转成 unix 行尾的纯文本
+          tr -d '\r' < .config > .config.tmp && mv .config.tmp .config
+          # 校验架构
+          if grep -qi "^CONFIG_ARM64=y" .config; then
+            echo "[+] CONFIG_ARM64=y 校验通过"
+          else
+            echo "[!] 警告: 非 arm64 配置 (未找到 CONFIG_ARM64=y)"
+          fi
+          if grep -qi "4.14" .config; then
+            echo "[+] 4.14.x 版本匹配"
+          else
+            echo "[!] 提示: 未找到 4.14 字样, 请确认来自 4.14.186"
+          fi
+
+      - name: Install toolchain
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            bc bison flex libelf-dev libssl-dev libncurses-dev \
+            cpio kmod zstd \
+            || { echo "[-] 工具链安装失败"; exit 1; }
+
+      - name: Clone kernel source
+        run: |
+          set -u
+          if git clone --depth 1 -b "$KERNEL_BRANCH" "$KERNEL_REPO" kernel_ares 2>&1 | tail -5; then
+            echo "[+] 主仓库克隆成功"
+          elif git clone --depth 1 -b "$KERNEL_BRANCH" "$BACKUP_REPO" kernel_ares 2>&1 | tail -5; then
+            echo "[+] 备用仓库克隆成功"
+          else
+            echo "[-] 两个仓库都克隆失败，检查网络或分支名" >&2
+            exit 1
+          fi
+          ls kernel_ares | head -20
+
+      - name: Apply config & build
+        run: |
+          set -u
+          cp .config kernel_ares/.config
+          cd kernel_ares
+          echo "[*] olddefconfig ..."
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig 2>&1 | tail -10
+          echo "[*] 全量编译 (Image modules) ..."
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j"$(nproc)" Image modules 2>&1 | tee build.log | tail -30
+          echo "[*] 编译结束, 检查产物 ..."
+          ls -lh vmlinux Image 2>/dev/null || true
+          if [ -f Module.symvers ]; then
+            echo "[+] Module.symvers: $(wc -l < Module.symvers) 条"
+          else
+            echo "[-] Module.symvers 未生成, 编译可能失败:"
+            tail -40 build.log
+            exit 2
+          fi
+
+      - name: Pack prepared kernel
+        run: |
+          set -u
+          if sh ./tools/pack_kernel.sh; then
+            ls -lh kernel_ares_prepared.tar.zst
+          else
+            echo "[-] 打包失败" >&2
+            exit 1
+          fi
+
+      - name: Upload Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: kernel-prep
+          name: Prepared Kernel Tree
+          files: kernel_ares_prepared.tar.zst
+          body: "预编译内核树，含 Module.symvers，供 build-ko 工作流增量编译驱动模块"
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Write back download URL
+        run: |
+          set -u
+          REPO="${{ github.repository }}"
+          URL="https://github.com/$REPO/releases/download/kernel-prep/kernel_ares_prepared.tar.zst"
+          echo "KERNEL_PREP_URL=$URL"
+          # 用 python 安全替换, 避免 sed 特殊字符转义问题
+          python3 - "$URL" <<'PY'
+          import sys, re
+          url = sys.argv[1]
+          path = ".github/workflows/build.yml"
+          with open(path, "r") as f:
+              s = f.read()
+          new_s = re.sub(r'(KERNEL_PREP_URL:\s*").*(")',
+                         lambda m: f'{m.group(1)}{url}{m.group(2)}', s)
+          if new_s == s:
+              print("[*] URL 未变化, 跳过提交")
+              sys.exit(0)
+          with open(path, "w") as f:
+              f.write(new_s)
+          PY
+          if git diff --quiet .github/workflows/build.yml; then
+            echo "[*] URL 未变化，跳过提交"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add .github/workflows/build.yml
+            git commit -m "ci: update KERNEL_PREP_URL [skip ci]"
+            git push
+          fi

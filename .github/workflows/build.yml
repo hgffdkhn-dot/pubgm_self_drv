@@ -1,57 +1,125 @@
 name: build-ko
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
-  workflow_dispatch:
+    paths:
+      - '**/*.c'
+      - '**/*.h'
+      - 'Makefile'
+      - 'Kbuild'
+      - 'Makefile.inc'
+      - 'tools/*.sh'
+      - '.github/workflows/*.yml'
+
+env:
+  KERNEL_PREP_URL: "https://github.com/REPLACE_WITH_YOUR_USER/REPLACE_WITH_YOUR_REPO/releases/download/kernel-prep/kernel_ares_prepared.tar.zst"
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
-    env:
-      # 小米官方仓库；红米K40游戏增强版 ares 的分支名是 ares-r-oss
-      KERNEL_REPO: https://github.com/MiCode/Xiaomi_Kernel_OpenSource
-      KERNEL_BRANCH: ares-r-oss
-      # 备用镜像（官方仓库挂了/太慢时取消注释换用）
-      # KERNEL_REPO: https://github.com/AbzRaider/kernel_xiaomi_ares
-      # KERNEL_BRANCH: S
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
       - name: Checkout driver
         uses: actions/checkout@v4
 
-      - name: Install deps
+      - name: Install toolchain & zstd
         run: |
-          sudo apt update
-          sudo apt install -y bc bison flex libssl-dev \
-            gcc-aarch64-linux-gnu make git
+          apt-get update -qq
+          apt-get install -y -qq \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            bc bison flex libelf-dev libssl-dev libncurses-dev \
+            zstd cpio kmod python3 \
+            || { echo "[-] 工具链安装失败"; exit 1; }
 
-      - name: Clone kernel source
+      - name: Find / prepare kernel tree
         run: |
-          git clone --depth 1 -b "$KERNEL_BRANCH" "$KERNEL_REPO" kernel_ares \
-            || git clone --depth 1 "https://github.com/AbzRaider/kernel_xiaomi_ares" -b S kernel_ares
-
-      - name: Upload phone config (optional)
-        uses: actions/upload-artifact@v4
-        with:
-          name: phone-config
-          path: config   # 把手机上 `zcat /proc/config.gz` 得到的 config 文件放仓库根目录即可启用
-        continue-on-error: true
-
-      - name: Prepare kernel
-        run: |
-          cd kernel_ares
-          if [ -f ../config ]; then
-            cp ../config .config
-            make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+          set -u
+          KS="$GITHUB_WORKSPACE/kernel_ares"
+          echo "[*] 尝试下载预编译内核树 ..."
+          mkdir -p "$KS"
+          FETCHED=0
+          if curl -sSL -o kernel.tar.zst "$KERNEL_PREP_URL" 2>/dev/null && [ -s kernel.tar.zst ]; then
+            echo "[+] 下载成功, 解压 ..."
+            ls -lh kernel.tar.zst
+            tar -xf kernel.tar.zst -C "$GITHUB_WORKSPACE" 2>&1 | tail -3
+            FETCHED=1
           else
-            make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- ares_defconfig
+            echo "[!] 预编译内核树不可用 (KERNEL_PREP_URL 未替换或 Release 未发布)"
           fi
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules_prepare -j$(nproc)
 
-      - name: Build driver
+          # 诊断: 无论走哪条路, 先把内核树状态打出来
+          echo "    --- 内核树状态 ---"
+          ls -la "$KS" 2>/dev/null | head -25 || true
+          if [ -f "$KS/Module.symvers" ]; then
+            echo "    Module.symvers: 存在 ($(wc -l < "$KS/Module.symvers") 条)"
+          else
+            echo "    Module.symvers: 缺失"
+          fi
+
+          # 若下载失败, 现场从 .config 编译（fallback）
+          if [ "$FETCHED" -eq 0 ]; then
+            echo "[*] 现场编译: 找 .config ..."
+            CFG=""
+            for f in .config config kernel_config config.txt; do
+              if [ -f "$f" ]; then CFG="$f"; break; fi
+            done
+            if [ -z "$CFG" ]; then
+              echo "[-] 根目录无 .config, 且预编译内核树不可用." >&2
+              echo "    请先推送手机导出的 .config 并跑 config-bootstrap, 或替换 build.yml 顶部的 KERNEL_PREP_URL." >&2
+              exit 1
+            fi
+            echo "[+] 使用 $CFG 现场编译内核"
+            git clone --depth 1 -b ares-r-oss \
+              https://github.com/MiCode/Xiaomi_Kernel_OpenSource "$KS" \
+              || git clone --depth 1 -b ares-r-oss \
+                 https://github.com/AbzRaider/kernel_xiaomi_ares "$KS" \
+              || { echo "[-] 内核源码 clone 失败"; exit 1; }
+            cp "$CFG" "$KS/.config"
+            cd "$KS"
+            make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+            make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j"$(nproc)" Image modules 2>&1 | tail -20
+            cd "$GITHUB_WORKSPACE"
+          fi
+
+          if [ ! -f "$KS/Module.symvers" ]; then
+            echo "[-] 内核树缺少 Module.symvers, 驱动模块必败" >&2
+            exit 2
+          fi
+          echo "[+] Module.symvers 就绪"
+
+      - name: Build driver module
         run: |
-          bash tools/randomize.sh
-          bash tools/build.sh
+          set -u
+          echo "[*] 随机化 ioctl cmd (randomize.sh 写 build/ 目录, 不修改工作区) ..."
+          sh ./tools/randomize.sh || { echo "[-] randomize 失败"; exit 1; }
+
+          echo "[*] 同步用户态 client.h ..."
+          sh ./tools/sync_client.sh || echo "[!] 同步失败, 继续"
+
+          echo "[*] 编译驱动 ..."
+          KERNEL_TREE="$GITHUB_WORKSPACE/kernel_ares" \
+            sh ./tools/build.sh 2>&1 | tee build.log
+          # 明确检查产物
+          if [ ! -f pubgm_self_drv.ko ]; then
+            echo "[-] 未产出 pubgm_self_drv.ko"
+            tail -50 build.log
+            exit 2
+          fi
+
+      - name: Build userspace client
+        run: |
+          set -u
+          # 用户态用本机 gcc 编译 (CI runner 是 x86, 此处只做语法检查, 手机上需交叉编译)
+          gcc -Wall -Wextra -O2 -c user/client.c -o user/client.o \
+            && echo "[+] client.c 语法检查通过" \
+            || { echo "[-] client.c 编译失败"; exit 1; }
+          # 交叉编译一份 aarch64 的 test_client
+          aarch64-linux-gnu-gcc -static -Wall -O2 -o user/test_client user/test_client.c user/client.c \
+            && echo "[+] test_client (aarch64 static) 编译成功" \
+            || echo "[!] test_client 交叉编译失败"
+          ls -lh user/client.o user/test_client 2>/dev/null
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -60,4 +128,9 @@ jobs:
           path: |
             pubgm_self_drv.ko
             user/test_client
-            user/libclient.a
+            user/client.o
+            tools/load.sh
+            tools/randomize.sh
+            tools/sync_client.sh
+            README.md
+          retention-days: 7

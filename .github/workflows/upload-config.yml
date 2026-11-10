@@ -1,0 +1,58 @@
+name: upload-config
+
+# 用户没有本地电脑/没法手动导出 .config 时，可用本流程:
+#   1. 手机上执行:  adb shell "zcat /proc/config.gz" > config.txt
+#   2. 把 config.txt 的内容复制粘贴成本仓库的 gist / 或推送到此仓库
+# 但更简单的做法: 直接在本仓库根目录新建文件 "config.txt" 写入内容并推送。
+#
+# 本工作流: 检测到根目录有 config.txt 后，自动标准化为 .config 并触发 bootstrap。
+
+on:
+  workflow_dispatch:
+    inputs:
+      base64_config:
+        description: "把 zcat /proc/config.gz 的输出先做 base64，粘贴到这里"
+        required: false
+        type: string
+  push:
+    branches: [main]
+    paths:
+      - 'config.txt'
+      - 'kernel_config.txt'
+
+jobs:
+  normalize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Convert uploaded config to .config
+        run: |
+          set -e
+          SRC=""
+          if [ -n "${{ inputs.base64_config }}" ]; then
+            echo "${{ inputs.base64_config }}" | base64 -d > .config
+            echo "[+] 从 workflow input 解码出 .config"
+          elif [ -f "config.txt" ]; then
+            mv config.txt .config && echo "[+] config.txt -> .config"
+          elif [ -f "kernel_config.txt" ]; then
+            mv kernel_config.txt .config && echo "[+] kernel_config.txt -> .config"
+          else
+            echo "[-] 没有可处理的配置文件"
+            exit 1
+          fi
+          echo "[*] 配置行数: $(wc -l < .config)"
+
+      - name: Commit .config
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .config
+          git commit -m "chore: add kernel .config from device [skip ci]" || echo "[*] 无变化"
+          git push || echo "[!] 推送失败，请检查仓库权限"
+
+      - name: Trigger bootstrap
+        run: |
+          echo "[*] .config 已提交，config-bootstrap 工作流将自动接力全量编译内核"
+          echo "    到 Actions 页面查看 config-bootstrap 进度（约 60-120 分钟）"

@@ -59,18 +59,65 @@ ensure_toolchain() {
 }
 ensure_toolchain
 
-# ---- 步骤 4: 内核树自检 ----
+# ---- 步骤 4: 内核树自检（缺失则现场 clone + 编译兜底）----
 echo "[*] 步骤 4/5: 检查内核树 ..."
 ensure_kernel_tree() {
     if [ -d "$KERNEL_TREE" ] && [ -f "$KERNEL_TREE/Makefile" ]; then
         echo "[+] 内核树: $KERNEL_TREE"
         return 0
     fi
-    echo "[-] 内核树不存在: $KERNEL_TREE" >&2
-    echo "    先执行: ./tools/prep_kernel.sh" >&2
-    exit 1
+    echo "[!] 内核树不存在: $KERNEL_TREE" >&2
+    echo "[*] 现场 clone ares-r-oss 并编译内核树 ..." >&2
+
+    # 寻找 .config（项目根目录优先）
+    CFG=""
+    for f in "$DRV_DIR/.config" "$DRV_DIR/config" "$DRV_DIR/kernel_config" "$DRV_DIR/config.txt"; do
+        if [ -f "$f" ]; then CFG="$f"; break; fi
+    done
+
+    # clone（官方源 + 备用源兜底）
+    rm -rf "$KERNEL_TREE"
+    mkdir -p "$KERNEL_TREE"
+    CLONED=0
+    for REPO in \
+        "https://github.com/MiCode/Xiaomi_Kernel_OpenSource" \
+        "https://github.com/AbzRaider/kernel_xiaomi_ares"; do
+        if git clone --depth 1 -b ares-r-oss "$REPO" "$KERNEL_TREE" 2>/dev/null; then
+            echo "[+] clone 成功: $REPO" >&2
+            CLONED=1
+            break
+        fi
+        echo "[!] $REPO 失败，尝试备用源 ..." >&2
+    done
+    if [ "$CLONED" -ne 1 ]; then
+        echo "[-] 内核源码 clone 失败（网络/分支问题）" >&2
+        return 1
+    fi
+
+    # 应用 config
+    if [ -n "$CFG" ]; then
+        echo "[+] 使用 $CFG" >&2
+        cp "$CFG" "$KERNEL_TREE/.config"
+        (cd "$KERNEL_TREE" && make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig 2>&1 | tail -3)
+    else
+        echo "[*] 无 .config，使用默认 ares_defconfig" >&2
+        (cd "$KERNEL_TREE" && make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- ares_defconfig 2>&1 | tail -3)
+    fi
+
+    # 全量编译（产出 Module.symvers）
+    echo "[*] 全量编译内核（耐心等待，约 60-120 分钟）..." >&2
+    (cd "$KERNEL_TREE" && \
+     make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)" \
+          Image modules 2>&1 | tail -5)
+
+    if [ -f "$KERNEL_TREE/Module.symvers" ]; then
+        echo "[+] 内核树就绪，Module.symvers: $(wc -l < "$KERNEL_TREE/Module.symvers") 条" >&2
+        return 0
+    fi
+    echo "[-] 编译完成但 Module.symvers 缺失" >&2
+    return 1
 }
-ensure_kernel_tree
+ensure_kernel_tree || { echo "[-] 内核树准备失败"; exit 2; }
 
 # 诊断: 列出内核树关键产物
 echo "    --- 内核树诊断 ---"
