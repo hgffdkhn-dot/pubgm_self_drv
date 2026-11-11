@@ -1,4 +1,4 @@
-.manifest
+# AUTOBUILD: 20261110-2215
 ./.github/workflows/build.yml
 ./.github/workflows/config-bootstrap.yml
 ./Kbuild
