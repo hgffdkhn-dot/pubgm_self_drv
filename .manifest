@@ -1,25 +1,10 @@
-# AUTOBUILD: 20261110-2230
+# AUTOBUILD: 20261110-2240
+./.config
 ./.github/workflows/build.yml
-./.github/workflows/config-bootstrap.yml
-./Kbuild
 ./Makefile
-./Makefile.inc
-./README.md
-./build/drv_ioctl.h
-./drv_main.c
-./hide.c
-./include/drv.h
-./include/pt_walk.h
-./ioctl_if.c
-./mem_core.c
 ./tools/build.sh
-./tools/diag.sh
 ./tools/load.sh
-./tools/pack_kernel.sh
-./tools/prep_kernel.sh
 ./tools/randomize.sh
 ./tools/sync_client.sh
-./user/Makefile
 ./user/client.c
-./user/client.h
 ./user/test_client.c

@@ -1,6 +1,7 @@
-# AUTOBUILD: 20261110-2230
-# 工具链策略: ubuntu-22.04 镜像自带优先, 缺失则本 job 内 bootstrap musl 链, 无需外部下载
+# AUTOBUILD: 20261110-2240
+# 工具链策略: 镜像自带 / 本地 bootstrap 兜底, 全程不联网下载外部二进制
 name: build-ko
+
 on:
   workflow_dispatch:
   push:
@@ -13,110 +14,136 @@ on:
       - 'Makefile.inc'
       - 'tools/*.sh'
       - '.github/workflows/*.yml'
-      - '.config'
-env:
-  TC_DIR: /opt/aarch64-linux-musl-cross
-  TC_CACHE: aarch64-musl-cross
+
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 300
+    timeout-minutes: 180
     steps:
-      - name: Checkout
+      - name: Checkout driver
         uses: actions/checkout@v4
 
-      - name: 准备交叉编译器 (优先用镜像自带, 缺失则本地 bootstrap musl 链)
+      - name: 准备交叉编译器（镜像自带 / bootstrap / 自建 release）
+        id: tc
         run: |
           set -u
-          if command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
-            echo "[+] 镜像自带 aarch64-linux-gnu-gcc: $(aarch64-linux-gnu-gcc --version | head -1)"
-            echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
-            echo "KCFLAGS=--sysroot=/usr/aarch64-linux-gnu" >> $GITHUB_ENV
-          else
-            echo "[*] 镜像无自带交叉编译器, 本 job 内 bootstrap aarch64-musl 工具链 ..."
-            TC="$GITHUB_WORKSPACE/musl-cross-make"
-            PREFIX="$GITHUB_WORKSPACE/aarch64-linux-musl"
-            if [ -x "$PREFIX/bin/aarch64-linux-musl-gcc" ]; then
-              echo "[+] 复用已编译的工具链"
-            else
-              export DEBIAN_FRONTEND=noninteractive
-              echo "[*] 安装编译依赖 (gcc make wget bison flex texinfo gperf) ..."
-              sudo -n apt-get update -qq >/dev/null 2>&1 || true
-              if sudo -n apt-get install -y -qq --no-install-recommends gcc g++ make wget bison flex texinfo gperf >/dev/null 2>&1; then
-                echo "[+] apt 依赖就绪"
-              else
-                echo "[!] sudo apt-get 不可用, 将仅用现有工具编译"
+          PREFIX="$GITHUB_WORKSPACE/toolchain"
+          mkdir -p "$PREFIX"
+          log() { echo "$@"; }
+
+          log "[1/3] 检查镜像自带 aarch64 工具链 ..."
+          HOST_GCC="$(command -v aarch64-linux-gnu-gcc || true)"
+          if [ -n "$HOST_GCC" ]; then
+            log "[+] 镜像自带: $HOST_GCC"
+            printf 'CROSS_COMPILE=aarch64-linux-gnu-\n' >> "$GITHUB_ENV"
+            echo "tc_source=host-image" >> "$GITHUB_OUTPUT"
+            log "[+] 工具链就绪 (镜像自带)"
+            exit 0
+          fi
+          log "[-] 镜像无自带 aarch64 工具链"
+
+          log "[2/3] 尝试本地 bootstrap musl 交叉编译器 ..."
+          for t in gcc g++ make git curl; do
+            command -v "$t" >/dev/null 2>&1 && log "[+] $t: $($t --version | head -1)" || log "[-] 缺少宿主工具: $t"
+          done
+
+          mkdir -p "$GITHUB_WORKSPACE/bootstrap"
+          cd "$GITHUB_WORKSPACE/bootstrap"
+
+          if git clone --depth 1 https://github.com/richfelker/musl-cross-make.git 2>&1 | tail -3; then
+            cd musl-cross-make
+            printf '%s\n' \
+              'TARGET = aarch64-linux-musl' \
+              'OUTPUT = /opt/cross' \
+              'GCC_VER = 11.5.0' \
+              'MUSL_VER = 1.2.5' \
+              'BINUTILS_VER = 2.42' \
+              'COMMON_CONFIG += CFLAGS="-O2 -pipe" CXXFLAGS="-O2 -pipe"' \
+              'GCC_CONFIG += --enable-languages=c,c++ --disable-multilib' \
+              'DL_CMD = curl -C - -L -o' \
+              > config.mak
+            log "[*] 开始编译 (可能 15-40 分钟, 全本地) ..."
+            if make -j"$(nproc)" 2>&1 | tail -5; then
+              if [ -x /opt/cross/bin/aarch64-linux-musl-gcc ]; then
+                ln -sfn /opt/cross "$PREFIX/musl-cross"
+                printf '%s/musl-cross/bin\n' "$PREFIX" >> "$GITHUB_PATH"
+                printf 'CROSS_COMPILE=aarch64-linux-musl-\n' >> "$GITHUB_ENV"
+                echo "tc_source=bootstrap" >> "$GITHUB_OUTPUT"
+                log "[+] 本地 bootstrap 成功"
+                exit 0
               fi
-              command -v gcc >/dev/null 2>&1 || { echo "[-] 无 gcc, 无法 bootstrap"; exit 1; }
-              [ -d "$TC" ] || git clone --depth 1 https://github.com/richfelker/musl-cross-make "$TC" 2>&1 | tail -2
-              cd "$TC"
-              printf 'TARGET = aarch64-linux-musl\nCOMMON_CONFIG = CFLAGS="-O2" CXXFLAGS="-O2" LDFLAGS="-s"\nGCC_CONFIG = --enable-languages=c,c++ --disable-multilib --disable-libsanitizer\nBINUTILS_CONFIG = --disable-multilib\nMUSL_CONFIG = --disable-debug\nOUTPUT = %s\n' "$PREFIX" > config.mak
-              echo "[*] 下载并编译 binutils/gcc/musl (约 15-30 分钟, 全本地) ..."
-              make -j"$(nproc)" 2>&1 | tail -5
-              [ -x "$PREFIX/bin/aarch64-linux-musl-gcc" ] || { echo "[-] bootstrap 失败"; exit 1; }
             fi
-            echo "CROSS_COMPILE=aarch64-linux-musl-" >> $GITHUB_ENV
-            echo "CC=$PREFIX/bin/aarch64-linux-musl-gcc" >> $GITHUB_ENV
-            echo "[+] 工具链就绪: $($PREFIX/bin/aarch64-linux-musl-gcc --version | head -1)"
+            log "[-] 本地 bootstrap 编译失败"
+          else
+            log "[-] clone musl-cross-make 失败 (网络受限?)"
           fi
 
-      - name: 最终工具链状态
-        run: |
-          export PATH="$TC_DIR/bin:$PATH"
-          command -v aarch64-linux-musl-gcc || { echo "[-] 交叉编译器仍缺失"; exit 1; }
-          aarch64-linux-musl-gcc --version | head -1
-          for t in ar nm strip ld objcopy; do command -v aarch64-linux-musl-$t || echo "[!] 缺 $t"; done
-          echo "[+] 工具链就绪: CROSS_COMPILE=aarch64-linux-musl-"
+          log "[3/3] 前两种均失败. 请本地准备工具链并上传 Release 'toolchain':"
+          log "    $ wget https://musl.cc/aarch64-linux-musl-cross.tgz"
+          log "    $ tar xf aarch64-linux-musl-cross.tgz"
+          log "    $ tar cJf aarch64-musl-toolchain.tar.xz aarch64-linux-musl-cross"
+          log "    到 GitHub Releases -> New, Tag 填 'toolchain', 上传 .tar.xz"
+          exit 1
 
-      - name: 检查内核树
+      - name: 准备内核树
         run: |
           set -u
           KS="$GITHUB_WORKSPACE/kernel_ares"
           mkdir -p "$KS"
-          echo "[*] 尝试下载预编译内核树 ..."
-          if curl -sSL --connect-timeout 20 --max-time 240 -o kernel.tar.zst "$KERNEL_PREP_URL" 2>/dev/null && [ -s kernel.tar.zst ]; then
-            echo "[+] 下载成功"; tar -xf kernel.tar.zst -C "$GITHUB_WORKSPACE" 2>&1 | tail -3
-          else echo "[!] 无可用预编译内核树, 将现场 clone 并编译"; fi
-          ls -la "$KS" 2>/dev/null | head -20
-          if [ ! -f "$KS/Module.symvers" ]; then
-            echo "[*] Module.symvers 缺失, 现场编译内核树 ..."
-            CFG=""; for f in .config config kernel_config config.txt; do [ -f "$f" ] && CFG="$f" && break; done
-            [ -z "$CFG" ] && { echo "[-] 根目录无 .config 且无可下载内核树"; exit 1; }
-            echo "[+] 使用配置 $CFG"
-            git clone --depth 1 -b ares-r-oss https://github.com/MiCode/Xiaomi_Kernel_OpenSource "$KS" 2>&1 | tail -2 || \
-            git clone --depth 1 -b ares-r-oss https://github.com/AbzRaider/kernel_xiaomi_ares "$KS" 2>&1 | tail -2 || \
-              { echo "[-] 内核 clone 失败"; exit 1; }
-            cp "$CFG" "$KS/.config"
-            export PATH="$TC_DIR/bin:$PATH"
-            make -C "$KS" ARCH=arm64 CROSS_COMPILE=aarch64-linux-musl- olddefconfig 2>&1 | tail -3
-            make -C "$KS" ARCH=arm64 CROSS_COMPILE=aarch64-linux-musl- -j"$(nproc)" Image modules 2>&1 | tail -8
-          fi
-          [ -f "$KS/Module.symvers" ] || { echo "[-] Module.symvers 仍缺失"; exit 2; }
-          echo "[+] Module.symvers 就绪 ($(wc -l < "$KS/Module.symvers") 条符号)"
+          log() { echo "$@"; }
 
-      - name: 编译驱动模块
+          CFG=""
+          for f in .config config kernel_config config.txt; do
+            if [ -f "$GITHUB_WORKSPACE/$f" ]; then CFG="$GITHUB_WORKSPACE/$f"; break; fi
+          done
+          if [ -n "$CFG" ]; then log "[+] 使用配置: $CFG"; else log "[!] 根目录无 .config"; fi
+
+          if [ ! -f "$KS/Module.symvers" ]; then
+            log "[*] 内核树未就绪, 现场 clone 并编译 ..."
+            rm -rf "$KS"
+            if ! git clone --depth 1 -b ares-r-oss https://github.com/MiCode/Xiaomi_Kernel_OpenSource "$KS" 2>&1 | tail -3; then
+              log "[-] MiCode 源不可用, 尝试备用源 ..."
+              git clone --depth 1 -b ares-r-oss https://github.com/AbzRaider/kernel_xiaomi_ares "$KS" 2>&1 | tail -3 \
+                || { log "[-] 内核源码 clone 失败"; exit 2; }
+            fi
+            if [ -n "$CFG" ]; then cp "$CFG" "$KS/.config"; else : > "$KS/.config"; fi
+            cd "$KS"
+            log "[*] 生成默认配置 ..."
+            make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" defconfig 2>&1 | tail -3 || true
+            [ -f .config ] || { log "[-] 无法生成内核 .config"; exit 2; }
+            log "[*] 编译内核 (Image + modules) ..."
+            make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" -j"$(nproc)" Image modules 2>&1 | tail -8
+            cd "$GITHUB_WORKSPACE"
+          fi
+
+          if [ -f "$KS/Module.symvers" ]; then
+            log "[+] Module.symvers 就绪 ($(wc -l < "$KS/Module.symvers") 条)"
+          else
+            log "[-] Module.symvers 仍缺失, 检查内核编译日志"; exit 2
+          fi
+
+      - name: 编译驱动
         run: |
           set -u
-          export PATH="$TC_DIR/bin:$PATH"
-          echo "[*] randomize ..."; sh ./tools/randomize.sh || { echo "[-] randomize 失败"; exit 1; }
-          sh ./tools/sync_client.sh 2>/dev/null || echo "[!] sync_client 跳过"
-          echo "[*] 编译 ko ..."
-          KERNEL_TREE="$GITHUB_WORKSPACE/kernel_ares" \
-          CROSS_COMPILE=aarch64-linux-musl- \
-          CC="$TC_DIR/bin/aarch64-linux-musl-gcc" \
-          sh ./tools/build.sh 2>&1 | tee build.log
-          [ -f pubgm_self_drv.ko ] || { echo "[-] 未产出 .ko"; tail -60 build.log; exit 2; }
-          aarch64-linux-musl-strip -g pubgm_self_drv.ko 2>/dev/null || true
-          ls -lh pubgm_self_drv.ko
+          echo "[*] CROSS_COMPILE=$CROSS_COMPILE"
+          [ -x tools/randomize.sh ] && sh ./tools/randomize.sh || echo "[!] randomize 跳过"
+          [ -x tools/sync_client.sh ] && sh ./tools/sync_client.sh || echo "[!] sync 跳过"
+          KERNEL_TREE="$GITHUB_WORKSPACE/kernel_ares" sh ./tools/build.sh 2>&1 | tee build.log
+          if [ -f pubgm_self_drv.ko ]; then
+            echo "[+] 产物: $(ls -lh pubgm_self_drv.ko | awk '{print $5, $9}')"
+          else
+            echo "[-] 未产出 .ko, 后 60 行日志:"; tail -60 build.log; exit 2
+          fi
 
       - name: 编译用户态 client
         run: |
           set -u
-          export PATH="$TC_DIR/bin:$PATH"
-          aarch64-linux-musl-gcc -static -Wall -O2 -o user/test_client user/test_client.c user/client.c \
-            && echo "[+] test_client 交叉编译成功" \
-            || echo "[!] test_client 失败(不影响 ko)"
-          ls -lh user/test_client 2>/dev/null
+          if [ -d user ] && [ -f user/test_client.c ]; then
+            $CROSS_COMPILE-gcc -static -Wall -O2 -o user/test_client user/test_client.c user/client.c \
+              && echo "[+] test_client OK" || echo "[!] test_client 失败(可忽略)"
+          else
+            echo "[!] user/ 源码缺失, 跳过"
+          fi
 
       - name: 上传产物
         uses: actions/upload-artifact@v4

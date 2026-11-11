@@ -1,14 +1,6 @@
-# Makefile for pubgm_self_drv kernel module
-#
-# 由 tools/build.sh 调用，通过 make -C $(KERNEL_TREE) M=$(PWD) 进入
-# 不要直接在此 Makefile 里执行，统一走 build.sh
-
-include Makefile.inc
-
+obj-m += pubgm_self_drv.o
 all:
-	$(MAKE) -C $(KERNEL_TREE) M=$(PWD) modules
-
+	$(MAKE) -C $(KERNEL_TREE) M=$(PWD) ARCH=arm64 CROSS_COMPILE=$(CROSS_COMPILE) modules
 clean:
 	$(MAKE) -C $(KERNEL_TREE) M=$(PWD) clean
-
-.PHONY: all clean
+ccflags-y := -D__KERNEL__ -Wall -O2
