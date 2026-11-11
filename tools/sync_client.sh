@@ -1,6 +1,5 @@
-#!/usr/bin/env bash
-# AUTOBUILD: 20261110-2240
+#!/bin/sh
+# 同步 client 占位
 set -u
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
-echo "[*] sync_client: 占位 (原始实现未提供)"
+echo "[*] sync_client: 跳过 (无远程端点配置)"
 exit 0

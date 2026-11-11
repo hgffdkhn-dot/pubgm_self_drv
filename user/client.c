@@ -1,2 +1,2 @@
-/* AUTOBUILD: 20261110-2240 placeholder */
-int client_init(void){ return 0; }
+#include <stdio.h>
+void client_init(void){ puts("[client] init"); }

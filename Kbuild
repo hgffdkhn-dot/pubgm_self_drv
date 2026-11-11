@@ -1,4 +1,2 @@
-# Kbuild - kernel build file
-# 与 Makefile 保持一致，部分内核版本只认 Kbuild
-
-include Makefile.inc
+obj-m += pubgm_self_drv.o
+pubgm_self_drv-objs := main.o

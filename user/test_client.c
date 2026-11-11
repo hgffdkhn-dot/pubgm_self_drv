@@ -1,2 +1,2 @@
-/* AUTOBUILD: 20261110-2240 placeholder */
-int main(void){ return 0; }
+#include <stdio.h>
+int main(void){ puts("pubgm_self_drv client"); return 0; }
